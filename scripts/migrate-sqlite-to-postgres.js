@@ -4,7 +4,7 @@ const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const fs = require('node:fs');
 const path = require('node:path');
-const { initializeDatabase } = require('../database');
+const { initializeDatabase, DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD } = require('../database');
 
 async function migrate() {
   const sqlitePath = process.env.SQLITE_PATH || path.join(__dirname, '..', 'data', 'database.db');
@@ -50,7 +50,7 @@ async function migrate() {
       const admin = await client.query('SELECT id FROM admins LIMIT 1');
       if (!admin.rowCount) {
         await client.query('INSERT INTO admins (username, password_hash) VALUES ($1, $2)', [
-          process.env.ADMIN_USERNAME || 'admin', bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'admin123', 12)
+          DEFAULT_ADMIN_USERNAME, bcrypt.hashSync(DEFAULT_ADMIN_PASSWORD, 12)
         ]);
       }
       await client.query('COMMIT');

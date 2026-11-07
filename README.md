@@ -9,16 +9,16 @@ A student feedback and administrator review app built with HTML, Bootstrap, vani
    ```sh
    createdb ai_student_feedback
    ```
-3. Copy `.env.example` to `.env` and set `DATABASE_URL` to your local PostgreSQL connection string. Set `SESSION_SECRET` and administrator credentials before exposing the app.
+3. Copy `.env.example` to `.env` and set `DATABASE_URL` to your local PostgreSQL connection string. Set a long `SESSION_SECRET` before exposing the app.
 4. Install dependencies and start the app:
    ```sh
    npm install
    npm start
    ```
 5. On startup, the app creates or updates all tables from `schema.sql`, seeds the default topics, and creates the first administrator if none exists.
-6. Open http://localhost:3000 to submit feedback and http://localhost:3000/login.html to sign in.
+6. Open http://localhost:3000 to submit feedback. When the PostgreSQL `admins` table is empty, the seeded login is `admin` / `admin123`; sign in at http://localhost:3000/login.html.
 
-Set `DATABASE_URL` in Render's environment to the database's internal URL when the web service and database share a region. For local connections to Render use its external URL with `sslmode=require`. Set `NODE_ENV=production`, `SESSION_SECRET`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, and `GEMINI_API_KEY` in the service environment. Render runs `npm start`; no local database files or disk mount are needed. See [Render's Postgres connection guide](https://render.com/docs/postgresql-creating-connecting) for current connection details.
+Set `DATABASE_URL` in Render's environment to the database's internal URL when the web service and database share a region. For local connections to Render use its external URL with `sslmode=require`. Set `NODE_ENV=production`, `SESSION_SECRET`, and `GEMINI_API_KEY` in the service environment. Render runs `npm start`; no local database files or disk mount are needed. See [Render's Postgres connection guide](https://render.com/docs/postgresql-creating-connecting) for current connection details.
 
 To create the tables manually before starting the app, run:
 
@@ -26,7 +26,7 @@ To create the tables manually before starting the app, run:
 psql "$DATABASE_URL" -f schema.sql
 ```
 
-The app uses parameterized PostgreSQL queries and `SERIAL` primary keys. Database setup and additive column migrations are idempotent. The first admin account is seeded only if no admin exists; changing `ADMIN_USERNAME` or `ADMIN_PASSWORD` later does not change an existing account.
+The app uses parameterized PostgreSQL queries and `SERIAL` primary keys. Database setup and additive column migrations are idempotent. If `admins` is empty, startup creates `admin` with password `admin123`; it does not overwrite existing administrator accounts.
 
 To copy an existing local SQLite database before deploying, set `DATABASE_URL` to the target PostgreSQL database and run `npm run migrate:sqlite`. The importer reads `data/database.db` by default; set `SQLITE_PATH` to use another file. It copies feedback, topics, administrator credentials, and settings without replacing conflicting PostgreSQL rows. It does not copy active login sessions. Keep the original SQLite file as a backup until you confirm the PostgreSQL data.
 
@@ -48,7 +48,6 @@ Feedback and sessions are stored in PostgreSQL and survive application restarts.
 
 - `DATABASE_URL`: required PostgreSQL connection string. Render supplies this when the database is linked to the web service.
 - `PORT`: defaults to `3000`; Render supplies its own port.
-- `ADMIN_USERNAME`, `ADMIN_PASSWORD`: used only to create the first administrator.
 - `SESSION_SECRET`: optional for local development; required in production.
 - `NODE_ENV=production`: enables Secure session cookies, so serve the app over HTTPS.
 

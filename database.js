@@ -3,6 +3,8 @@ const bcrypt = require('bcryptjs');
 const fs = require('node:fs');
 const path = require('node:path');
 const { DEFAULT_TOPICS } = require('./topics');
+const DEFAULT_ADMIN_USERNAME = 'admin';
+const DEFAULT_ADMIN_PASSWORD = 'admin123';
 
 async function initializeDatabase(pool, { seedAdmin = true } = {}) {
   const client = await pool.connect();
@@ -31,12 +33,16 @@ async function initializeDatabase(pool, { seedAdmin = true } = {}) {
     }
 
     if (seedAdmin) {
+      // Serialize startup seeding across Render instances so an empty table
+      // cannot race into multiple administrator rows.
+      await client.query('SELECT pg_advisory_xact_lock(781234567890::bigint)');
       const admin = await client.query('SELECT id FROM admins LIMIT 1');
       if (!admin.rowCount) {
-        await client.query('INSERT INTO admins (username, password_hash) VALUES ($1, $2) ON CONFLICT (username) DO NOTHING', [
-          process.env.ADMIN_USERNAME || 'admin',
-          bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'admin123', 12)
+        await client.query('INSERT INTO admins (username, password_hash) VALUES ($1, $2)', [
+          DEFAULT_ADMIN_USERNAME,
+          bcrypt.hashSync(DEFAULT_ADMIN_PASSWORD, 12)
         ]);
+        console.info('Created default administrator account because the admins table was empty.');
       }
     }
     await client.query('DELETE FROM sessions WHERE expires < $1', [Date.now()]);
@@ -61,4 +67,4 @@ async function openDatabase(connectionString = process.env.DATABASE_URL) {
   }
 }
 
-module.exports = { openDatabase, initializeDatabase };
+module.exports = { openDatabase, initializeDatabase, DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD };
