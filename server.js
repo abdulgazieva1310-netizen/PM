@@ -1,36 +1,47 @@
+require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
-const { DatabaseSync: Database } = require('node:sqlite');
 const bcrypt = require('bcryptjs');
 const helmet = require('helmet');
 const { rateLimit } = require('express-rate-limit');
 const { randomBytes } = require('node:crypto');
 const path = require('node:path');
+const PDFDocument = require('pdfkit');
+const ExcelJS = require('exceljs');
 const { openDatabase } = require('./database');
-const { createAnalyzer, saveFeedback } = require('./analysis');
-const { listTopics, addTopic, deleteTopic, listFeedback, topicStatistics } = require('./topics');
-class SQLiteStore extends session.Store {
-  constructor(directory) {
-    super();
-    this.db = new Database(path.join(directory, 'sessions.db'));
-    this.db.exec('PRAGMA journal_mode = WAL');
-    this.db.exec('CREATE TABLE IF NOT EXISTS sessions (sid TEXT PRIMARY KEY, data TEXT NOT NULL, expires INTEGER NOT NULL)');
-    this.db.prepare('DELETE FROM sessions WHERE expires < ?').run(Date.now());
+const { createAnalyzer, createKeyIssueAnalyzer, saveFeedback, describeAnalysisError } = require('./analysis');
+const { listTopics, addTopic, deleteTopic, listFeedback, topicStatistics, weeklyReport } = require('./topics');
+class PostgresSessionStore extends session.Store {
+  constructor(db) { super(); this.db = db; }
+  get(sid, cb) {
+    this.db.query('SELECT data FROM sessions WHERE sid = $1 AND expires > $2', [sid, Date.now()])
+      .then(result => cb(null, result.rows[0]?.data || null)).catch(cb);
   }
-  get(sid, cb) { try { const row = this.db.prepare('SELECT data FROM sessions WHERE sid = ? AND expires > ?').get(sid, Date.now()); cb(null, row ? JSON.parse(row.data) : null); } catch (e) { cb(e); } }
-  set(sid, value, cb) { try { this.db.prepare('INSERT OR REPLACE INTO sessions VALUES (?, ?, ?)').run(sid, JSON.stringify(value), new Date(value.cookie.expires).getTime()); cb?.(); } catch(e) { cb?.(e); } }
-  destroy(sid, cb) { try { this.db.prepare('DELETE FROM sessions WHERE sid = ?').run(sid); cb?.(); } catch(e) { cb?.(e); } }
+  set(sid, value, cb) {
+    const expires = value.cookie?.expires ? new Date(value.cookie.expires).getTime() : Date.now() + (value.cookie?.maxAge || 8 * 60 * 60 * 1000);
+    this.db.query('INSERT INTO sessions (sid, data, expires) VALUES ($1, $2::jsonb, $3) ON CONFLICT (sid) DO UPDATE SET data = EXCLUDED.data, expires = EXCLUDED.expires', [sid, JSON.stringify(value), expires])
+      .then(() => cb?.(null)).catch(error => cb?.(error));
+  }
+  destroy(sid, cb) {
+    this.db.query('DELETE FROM sessions WHERE sid = $1', [sid]).then(() => cb?.(null)).catch(error => cb?.(error));
+  }
+  touch(sid, value, cb) { this.set(sid, value, cb); }
 }
-function createApp({ dataDir = path.join(__dirname, 'data'), analyze = createAnalyzer() } = {}) {
+async function createApp({ databaseUrl = process.env.DATABASE_URL, db: suppliedDb, analyze = createAnalyzer(), analyzeKeyIssues = createKeyIssueAnalyzer() } = {}) {
   const production = process.env.NODE_ENV === 'production';
   if (production && !process.env.SESSION_SECRET) throw new Error('SESSION_SECRET is required in production');
-  const db = openDatabase(dataDir);
+  const db = suppliedDb || await openDatabase(databaseUrl);
+  const ownsDb = !suppliedDb;
   let secret = process.env.SESSION_SECRET;
   if (!secret) {
-    secret = db.prepare("SELECT value FROM settings WHERE key = 'session_secret'").get()?.value;
-    if (!secret) { secret = randomBytes(48).toString('hex'); db.prepare('INSERT INTO settings VALUES (?, ?)').run('session_secret', secret); }
+    secret = (await db.query("SELECT value FROM settings WHERE key = 'session_secret'")).rows[0]?.value;
+    if (!secret) {
+      secret = randomBytes(48).toString('hex');
+      await db.query("INSERT INTO settings (key, value) VALUES ('session_secret', $1) ON CONFLICT (key) DO NOTHING", [secret]);
+      secret = (await db.query("SELECT value FROM settings WHERE key = 'session_secret'")).rows[0].value;
+    }
   }
-  const store = new SQLiteStore(dataDir);
+  const store = new PostgresSessionStore(db);
   const app = express();
   app.disable('x-powered-by');
   app.use(helmet());
@@ -43,19 +54,101 @@ function createApp({ dataDir = path.join(__dirname, 'data'), analyze = createAna
     next();
   });
   const requireAdmin = (req, res, next) => req.session.adminId ? next() : res.status(401).json({ error: 'Please log in.' });
-  app.get('/api/topics', (req, res) => res.json(listTopics(db)));
-  app.post('/api/topics', requireAdmin, (req, res) => {
-    try { res.status(201).json(addTopic(db, req.body?.name)); }
+  app.get('/api/topics', async (req, res) => res.json(await listTopics(db)));
+  app.post('/api/topics', requireAdmin, async (req, res) => {
+    try { res.status(201).json(await addTopic(db, req.body?.name)); }
     catch (error) { if (!error.status) throw error; res.status(error.status).json({ error: error.message }); }
   });
-  app.delete('/api/topics/:id', requireAdmin, (req, res) => {
-    try { deleteTopic(db, Number(req.params.id)); res.json({ success: true }); }
+  app.delete('/api/topics/:id', requireAdmin, async (req, res) => {
+    try { await deleteTopic(db, Number(req.params.id)); res.json({ success: true }); }
     catch (error) { if (!error.status) throw error; res.status(error.status).json({ error: error.message }); }
   });
-  app.get('/api/statistics/topics', requireAdmin, (req, res) => res.json(topicStatistics(db)));
+  app.get('/api/statistics/topics', requireAdmin, async (req, res) => res.json(await topicStatistics(db)));
+  app.get('/api/admin/key-issues', requireAdmin, async (req, res, next) => {
+    try {
+      const end = new Date();
+      const start = new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
+      const result = await db.query('SELECT text FROM feedback WHERE submitted_at >= $1 AND submitted_at <= $2 ORDER BY submitted_at DESC LIMIT 100', [start, end]);
+      const feedbacks = result.rows.map((item, index) => ({ id: index + 1, text: item.text.slice(0, 1000) }));
+      let issues = [];
+      if (feedbacks.length) {
+        try { issues = await analyzeKeyIssues(feedbacks); }
+        catch (error) { return res.status(503).json({ error: describeAnalysisError(error) }); }
+      }
+      res.json({ period: { start: start.toISOString(), end: end.toISOString() }, feedbackCount: feedbacks.length, issues });
+    } catch (error) { next(error); }
+  });
+  app.get('/api/admin/weekly-report', requireAdmin, async (req, res) => res.json(await weeklyReport(db)));
+  app.get('/api/admin/weekly-report/pdf', requireAdmin, async (req, res, next) => {
+    try {
+      const report = await weeklyReport(db);
+      const doc = new PDFDocument({ size: 'A4', margin: 52, info: { Title: 'Weekly Feedback Report', Author: 'Campus Voice' } });
+      res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="weekly-feedback-report.pdf"' });
+      doc.on('error', next);
+      doc.pipe(res);
+      doc.rect(0, 0, doc.page.width, 145).fill('#173c37');
+      doc.circle(80, 67, 28).fill('#dff2e8');
+      doc.fillColor('#173c37').font('Helvetica-Bold').fontSize(17).text('CV', 64, 59, { width: 32, align: 'center' });
+      doc.fillColor('#ffffff').fontSize(10).font('Helvetica-Bold').text('CAMPUS VOICE  /  ADMINISTRATOR REPORT', 125, 44);
+      doc.fontSize(25).text('Weekly Feedback Report', 125, 65);
+      doc.fillColor('#d4e5dc').fontSize(11).font('Helvetica').text(`${report.period.start.slice(0, 10)} – ${report.period.end.slice(0, 10)} (UTC)`, 125, 103);
+      doc.moveDown(4).fillColor('#173c37').font('Helvetica-Bold').fontSize(15).text('Weekly statistics');
+      const stats = [
+        ['Total submissions', String(report.totalSubmissions)],
+        ['Positive feedback', String(report.positive)],
+        ['Negative feedback', String(report.negative)],
+        ['Average intensity', report.averageIntensity == null ? 'N/A' : `${report.averageIntensity} / 10`]
+      ];
+      let y = doc.y + 14;
+      stats.forEach(([label, value], index) => {
+        const x = 52 + (index % 2) * 252;
+        const rowY = y + Math.floor(index / 2) * 66;
+        doc.roundedRect(x, rowY, 236, 52, 8).fill(index % 2 ? '#f1f6f2' : '#e8f2eb');
+        doc.fillColor('#60736c').font('Helvetica').fontSize(9).text(label.toUpperCase(), x + 14, rowY + 10);
+        doc.fillColor('#173c37').font('Helvetica-Bold').fontSize(17).text(value, x + 14, rowY + 25);
+      });
+      y += 154;
+      doc.fillColor('#173c37').font('Helvetica-Bold').fontSize(15).text('Top topics', 52, y);
+      y = doc.y + 14;
+      if (!report.topTopics.length) doc.fillColor('#60736c').font('Helvetica').fontSize(11).text('No submissions in this period.', 52, y);
+      report.topTopics.forEach((item, index) => {
+        const rowY = y + index * 34;
+        doc.roundedRect(52, rowY, 488, 27, 5).fill(index % 2 ? '#f6f8f5' : '#edf3ee');
+        doc.fillColor('#173c37').font('Helvetica').fontSize(11).text(item.topic, 64, rowY + 8, { width: 380 });
+        doc.fillColor('#276b56').font('Helvetica-Bold').text(String(item.count), 462, rowY + 8, { width: 64, align: 'right' });
+      });
+      doc.end();
+    } catch (error) { next(error); }
+  });
+  app.get('/api/admin/weekly-report/excel', requireAdmin, async (req, res, next) => {
+    try {
+      const report = await weeklyReport(db);
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = 'Campus Voice';
+      workbook.created = new Date();
+      const sheet = workbook.addWorksheet('Weekly Report', { views: [{ state: 'frozen', ySplit: 1 }] });
+      sheet.columns = [{ header: 'Metric', key: 'metric', width: 30 }, { header: 'Value', key: 'value', width: 38 }];
+      sheet.addRows([
+        { metric: 'Report period (UTC)', value: `${report.period.start.slice(0, 10)} to ${report.period.end.slice(0, 10)}` },
+        { metric: 'Total submissions', value: report.totalSubmissions },
+        { metric: 'Positive feedback', value: report.positive },
+        { metric: 'Negative feedback', value: report.negative },
+        { metric: 'Average intensity', value: report.averageIntensity == null ? 'N/A' : `${report.averageIntensity} / 10` },
+        { metric: '', value: '' },
+        { metric: 'Top topics', value: 'Submissions' },
+        ...report.topTopics.map(item => ({ metric: item.topic, value: item.count }))
+      ]);
+      sheet.getRow(1).height = 24;
+      sheet.getRow(1).eachCell(cell => { cell.font = { bold: true, color: { argb: 'FFFFFFFF' } }; cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF173C37' } }; });
+      sheet.getRow(8).eachCell(cell => { cell.font = { bold: true, color: { argb: 'FFFFFFFF' } }; cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF276B56' } }; });
+      sheet.eachRow((row, number) => { if (number > 1 && number !== 8 && number % 2 === 0) row.eachCell(cell => { cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F6F2' } }; }); });
+      res.set({ 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Content-Disposition': 'attachment; filename="weekly-feedback-report.xlsx"' });
+      res.send(await workbook.xlsx.writeBuffer());
+    } catch (error) { next(error); }
+  });
   app.post('/api/feedback', rateLimit({ windowMs: 60000, limit: 20, legacyHeaders: false, message: { error: 'Too many submissions. Please try again in a minute.' } }), async (req, res) => {
     const { topic, text } = req.body || {};
-    if (!listTopics(db).some(item => item.name === topic) || typeof text !== 'string' || !text.trim() || text.trim().length > 5000) return res.status(400).json({ error: 'Choose a valid topic and enter feedback between 1 and 5,000 characters.' });
+    if (!(await listTopics(db)).some(item => item.name === topic) || typeof text !== 'string' || !text.trim() || text.trim().length > 5000) return res.status(400).json({ error: 'Choose a valid topic and enter feedback between 1 and 5,000 characters.' });
     const result = await saveFeedback(db, { topic, text }, analyze);
     res.status(201).json({ ...result, message: result.analyzed
       ? 'Your feedback has been submitted successfully!'
@@ -66,7 +159,7 @@ function createApp({ dataDir = path.join(__dirname, 'data'), analyze = createAna
     try {
       const { username, password } = req.body || {};
       if (typeof username !== 'string' || typeof password !== 'string' || password.length > 256 || username.length > 100) return res.status(400).json({ error: 'Enter a valid username and password.' });
-      const admin = db.prepare('SELECT * FROM admins WHERE username = ?').get(username);
+      const admin = (await db.query('SELECT * FROM admins WHERE username = $1', [username])).rows[0];
       const valid = await bcrypt.compare(password, admin?.password_hash || dummyHash);
       if (!admin || !valid) return res.status(401).json({ error: 'Invalid username or password.' });
       req.session.regenerate(error => {
@@ -76,9 +169,9 @@ function createApp({ dataDir = path.join(__dirname, 'data'), analyze = createAna
       });
     } catch(e) { next(e); }
   });
-  app.get('/api/feedback', requireAdmin, (req, res) => {
+  app.get('/api/feedback', requireAdmin, async (req, res) => {
     if (req.query.topic !== undefined && (typeof req.query.topic !== 'string' || req.query.topic.length > 80)) return res.status(400).json({ error: 'Invalid topic filter.' });
-    res.json(listFeedback(db, req.query.topic));
+    res.json(await listFeedback(db, req.query.topic));
   });
   app.post('/api/logout', requireAdmin, (req, res, next) => req.session.destroy(error => {
     if (error) return next(error);
@@ -98,12 +191,13 @@ function createApp({ dataDir = path.join(__dirname, 'data'), analyze = createAna
     console.error(err.message);
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
   });
-  return { app, close() { store.db.close(); db.close(); } };
+  return { app, close() { return ownsDb ? db.end() : Promise.resolve(); } };
 }
 if (require.main === module) {
-  const { app, close } = createApp();
-  const server = app.listen(process.env.PORT || 3000, () => console.log(`Student feedback app: http://localhost:${process.env.PORT || 3000}`));
-  server.on('error', error => { console.error(`Cannot start server: ${error.message}`); close(); process.exitCode = 1; });
-  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => server.close(() => { close(); process.exit(0); }));
+  createApp().then(({ app, close }) => {
+    const server = app.listen(process.env.PORT || 3000, () => console.log(`Student feedback app: http://localhost:${process.env.PORT || 3000}`));
+    server.on('error', error => { console.error(`Cannot start server: ${error.message}`); close(); process.exitCode = 1; });
+    for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => server.close(() => close().finally(() => process.exit(0))));
+  }).catch(error => { console.error(`Cannot start server: ${error.message}`); process.exitCode = 1; });
 }
 module.exports = { createApp };

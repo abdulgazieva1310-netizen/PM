@@ -1,41 +1,64 @@
-const { DatabaseSync: Database } = require('node:sqlite');
+const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const fs = require('node:fs');
 const path = require('node:path');
 const { DEFAULT_TOPICS } = require('./topics');
-function openDatabase(directory) {
-  fs.mkdirSync(directory, { recursive: true });
-  const db = new Database(path.join(directory, 'database.db'));
-  db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA synchronous = FULL');
-  db.exec(`CREATE TABLE IF NOT EXISTS admins (id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY, topic TEXT NOT NULL, text TEXT NOT NULL, submitted_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
-  // Idempotent migration: existing submissions and administrator credentials remain intact.
-  db.exec('BEGIN IMMEDIATE');
+
+async function initializeDatabase(pool, { seedAdmin = true } = {}) {
+  const client = await pool.connect();
   try {
-    db.exec('CREATE TABLE IF NOT EXISTS topics (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE)');
-    if (!db.prepare("SELECT value FROM settings WHERE key = 'topics_initialized'").get()) {
-      const insert = db.prepare('INSERT OR IGNORE INTO topics (name) VALUES (?)');
-      for (const name of DEFAULT_TOPICS) insert.run(name);
-      for (const row of db.prepare('SELECT DISTINCT topic FROM feedback').all()) insert.run(row.topic);
-      db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('topics_initialized', '1');
+    await client.query('BEGIN');
+    await client.query(fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'));
+    await client.query(`
+      ALTER TABLE feedback ADD COLUMN IF NOT EXISTS sentiment TEXT CHECK (sentiment IN ('Positive', 'Negative', 'Neutral'));
+      ALTER TABLE feedback ADD COLUMN IF NOT EXISTS language TEXT CHECK (language IN ('Kazakh', 'Russian', 'English', 'Other', 'Unknown'));
+      ALTER TABLE feedback ADD COLUMN IF NOT EXISTS intensity INTEGER CHECK (intensity BETWEEN 1 AND 10);
+      ALTER TABLE feedback ADD COLUMN IF NOT EXISTS analysis_error TEXT;
+      ALTER TABLE feedback ADD COLUMN IF NOT EXISTS ai_detected_topic TEXT;
+      ALTER TABLE feedback ADD COLUMN IF NOT EXISTS summary TEXT;
+    `);
+
+    const initialized = await client.query("SELECT value FROM settings WHERE key = 'topics_initialized'");
+    if (!initialized.rowCount) {
+      for (const name of DEFAULT_TOPICS) {
+        await client.query('INSERT INTO topics (name) VALUES ($1) ON CONFLICT DO NOTHING', [name]);
+      }
+      const oldTopics = await client.query('SELECT DISTINCT topic FROM feedback');
+      for (const row of oldTopics.rows) {
+        await client.query('INSERT INTO topics (name) VALUES ($1) ON CONFLICT DO NOTHING', [row.topic]);
+      }
+      await client.query("INSERT INTO settings (key, value) VALUES ('topics_initialized', '1') ON CONFLICT DO NOTHING");
     }
-    const columns = new Set(db.prepare('PRAGMA table_info(feedback)').all().map(column => column.name));
-    for (const [name, definition] of [
-      ['sentiment', "TEXT CHECK (sentiment IN ('Positive', 'Negative', 'Neutral'))"],
-      ['language', "TEXT CHECK (language IN ('Kazakh', 'Russian', 'English', 'Other', 'Unknown'))"],
-      ['intensity', 'INTEGER CHECK (intensity BETWEEN 1 AND 10)'],
-      ['analysis_error', 'TEXT'],
-      ['ai_detected_topic', 'TEXT']
-    ]) {
-      if (!columns.has(name)) db.exec(`ALTER TABLE feedback ADD COLUMN ${name} ${definition}`);
+
+    if (seedAdmin) {
+      const admin = await client.query('SELECT id FROM admins LIMIT 1');
+      if (!admin.rowCount) {
+        await client.query('INSERT INTO admins (username, password_hash) VALUES ($1, $2) ON CONFLICT (username) DO NOTHING', [
+          process.env.ADMIN_USERNAME || 'admin',
+          bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'admin123', 12)
+        ]);
+      }
     }
-    db.exec('COMMIT');
-  } catch (error) { db.exec('ROLLBACK'); db.close(); throw error; }
-  if (!db.prepare('SELECT id FROM admins LIMIT 1').get()) {
-    db.prepare('INSERT INTO admins (username, password_hash) VALUES (?, ?)').run(process.env.ADMIN_USERNAME || 'admin', bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'admin123', 12));
+    await client.query('DELETE FROM sessions WHERE expires < $1', [Date.now()]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
-  return db;
 }
-module.exports = { openDatabase };
+
+async function openDatabase(connectionString = process.env.DATABASE_URL) {
+  if (!connectionString?.trim()) throw new Error('DATABASE_URL is required to connect to PostgreSQL.');
+  const pool = new Pool({ connectionString, max: 10, idleTimeoutMillis: 30000, connectionTimeoutMillis: 10000 });
+  try {
+    await initializeDatabase(pool);
+    return pool;
+  } catch (error) {
+    await pool.end();
+    throw error;
+  }
+}
+
+module.exports = { openDatabase, initializeDatabase };

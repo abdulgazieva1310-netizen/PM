@@ -2,6 +2,17 @@ const message = document.querySelector('#message');
 const refresh = document.querySelector('#refresh');
 const topicFilter = document.querySelector('#topic-filter');
 const topicMessage = document.querySelector('#topic-message');
+const keyIssuesList = document.querySelector('#key-issues-list');
+const keyIssuesPeriod = document.querySelector('#key-issues-period');
+const keyIssuesRefresh = document.querySelector('#key-issues-refresh');
+const weeklyReportButton = document.querySelector('#weekly-report');
+const weeklyReportDialog = document.querySelector('#weekly-report-dialog');
+const weeklyReportStatus = document.querySelector('#weekly-report-status');
+const weeklyReportMetrics = document.querySelector('#weekly-report-metrics');
+const weeklyReportSentiment = document.querySelector('#weekly-report-sentiment');
+const weeklyReportTopics = document.querySelector('#weekly-report-topics');
+const weeklyReportDownloads = [...document.querySelectorAll('#weekly-report-pdf, #weekly-report-excel, #weekly-report-csv')];
+let currentWeeklyReport = null;
 async function api(url, options) {
   const response = await fetch(url, options);
   if (response.status === 401) { window.location.replace('/login.html'); throw new Error('Please log in.'); }
@@ -61,15 +72,20 @@ async function loadFeedback() {
     document.querySelector('#analysis-note').textContent = `${unanalyzed} submission(s) not analyzed. Existing or unavailable analyses are excluded from sentiment counts. AI estimates may be imperfect. Intensity: 1 (mild) to 10 (strong).`;
     for (const item of data) {
       const row = document.createElement('tr');
-      const values = [item.topic, item.ai_detected_topic || 'Not analyzed', item.text, item.sentiment || 'Not analyzed', item.language || '—', item.intensity == null ? '—' : `${item.intensity} / 10`, new Date(item.submitted_at).toLocaleString()];
+      const values = [item.topic, item.ai_detected_topic || 'Not analyzed', item.summary || item.text, item.text, item.sentiment || 'Not analyzed', item.language || '—', item.intensity == null ? '—' : `${item.intensity} / 10`, new Date(item.submitted_at).toLocaleString()];
       values.forEach((value, index) => {
         const cell = document.createElement('td');
-        if (index === 3 && ['Positive', 'Negative', 'Neutral'].includes(item.sentiment)) {
+        if (index === 2) {
+          const summary = document.createElement('small');
+          summary.className = 'text-secondary fst-italic';
+          summary.textContent = value;
+          cell.append(summary);
+        } else if (index === 4 && ['Positive', 'Negative', 'Neutral'].includes(item.sentiment)) {
           const badge = document.createElement('span');
           badge.className = `sentiment-badge sentiment-${item.sentiment.toLowerCase()}`;
           badge.textContent = value; cell.append(badge);
         } else { cell.textContent = value; }
-        if (index === 3 && !item.sentiment && item.analysis_error) {
+        if (index === 4 && !item.sentiment && item.analysis_error) {
           const reason = document.createElement('small');
           reason.className = 'd-block text-danger mt-2';
           reason.textContent = item.analysis_error;
@@ -105,3 +121,118 @@ document.querySelector('#logout').addEventListener('click', async () => {
   } catch(error) { message.hidden = false; message.className = 'm-3 alert alert-danger'; message.textContent = error.message; }
 });
 loadFeedback();
+function closeWeeklyReport() { weeklyReportDialog.close(); }
+function addMetricCard(container, label, value, icon, tone) {
+  const card = document.createElement('article'); card.className = `weekly-metric-card ${tone}`;
+  const iconBox = document.createElement('span'); iconBox.className = 'weekly-metric-icon'; iconBox.setAttribute('aria-hidden', 'true'); iconBox.innerHTML = icon;
+  const name = document.createElement('span'); name.className = 'weekly-metric-label'; name.textContent = label;
+  const number = document.createElement('strong'); number.className = 'weekly-metric-value'; number.textContent = value;
+  card.append(iconBox, name, number); container.append(card);
+}
+function addChartBar(container, label, value, maximum, tone) {
+  const row = document.createElement('li'); row.className = 'weekly-chart-row';
+  const heading = document.createElement('div'); heading.className = 'weekly-chart-label';
+  const name = document.createElement('span'); name.textContent = label;
+  const count = document.createElement('strong'); count.textContent = value.toLocaleString();
+  heading.append(name, count);
+  const track = document.createElement('div'); track.className = 'weekly-chart-track'; track.setAttribute('role', 'img'); track.setAttribute('aria-label', `${label}: ${value} submissions`);
+  const bar = document.createElement('span'); bar.className = `weekly-chart-bar ${tone}`;
+  bar.style.width = `${maximum ? Math.max(value ? 3 : 0, value / maximum * 100) : 0}%`;
+  track.append(bar); row.append(heading, track); container.append(row);
+}
+function renderWeeklyReport(report) {
+  weeklyReportStatus.textContent = `${new Date(report.period.start).toLocaleDateString()} – ${new Date(report.period.end).toLocaleDateString()} · Last 7 days`;
+  weeklyReportMetrics.replaceChildren();
+  addMetricCard(weeklyReportMetrics, 'Submissions', report.totalSubmissions.toLocaleString(), '<svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>', 'tone-green');
+  addMetricCard(weeklyReportMetrics, 'Positive', report.positive.toLocaleString(), '<svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>', 'tone-positive');
+  addMetricCard(weeklyReportMetrics, 'Negative', report.negative.toLocaleString(), '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>', 'tone-negative');
+  addMetricCard(weeklyReportMetrics, 'Avg. intensity', report.averageIntensity == null ? '—' : `${report.averageIntensity} / 10`, '<svg viewBox="0 0 24 24"><path d="M4 19V5m0 14h17M8 15l4-5 3 3 5-7"/></svg>', 'tone-purple');
+  weeklyReportSentiment.replaceChildren();
+  const sentimentMax = Math.max(report.positive, report.negative);
+  addChartBar(weeklyReportSentiment, 'Positive', report.positive, sentimentMax, 'bar-positive');
+  addChartBar(weeklyReportSentiment, 'Negative', report.negative, sentimentMax, 'bar-negative');
+  weeklyReportTopics.replaceChildren();
+  const topicMax = Math.max(0, ...report.topTopics.map(item => item.count));
+  if (!report.topTopics.length) {
+    const empty = document.createElement('li'); empty.className = 'weekly-chart-empty'; empty.textContent = 'No submissions in this period.'; weeklyReportTopics.append(empty);
+  } else report.topTopics.forEach(item => addChartBar(weeklyReportTopics, item.topic, item.count, topicMax, 'bar-topic'));
+}
+document.querySelector('#weekly-report-close').addEventListener('click', closeWeeklyReport);
+document.querySelector('#weekly-report-done').addEventListener('click', closeWeeklyReport);
+weeklyReportButton.addEventListener('click', async () => {
+  currentWeeklyReport = null;
+  weeklyReportDownloads.forEach(button => { button.disabled = true; });
+  weeklyReportStatus.textContent = 'Loading report…';
+  weeklyReportMetrics.replaceChildren(); weeklyReportSentiment.replaceChildren(); weeklyReportTopics.replaceChildren();
+  weeklyReportDialog.showModal();
+  weeklyReportButton.disabled = true;
+  try {
+    currentWeeklyReport = await api('/api/admin/weekly-report');
+    renderWeeklyReport(currentWeeklyReport);
+    weeklyReportDownloads.forEach(button => { button.disabled = false; });
+  } catch (error) {
+    weeklyReportStatus.textContent = error.message || 'Could not generate the weekly report.';
+  } finally { weeklyReportButton.disabled = false; }
+});
+document.querySelector('#weekly-report-csv').addEventListener('click', () => {
+  if (!currentWeeklyReport) return;
+  const rows = [
+    ['Metric', 'Value'],
+    ['Report start (UTC)', currentWeeklyReport.period.start],
+    ['Report end (UTC)', currentWeeklyReport.period.end],
+    ['Total submissions', currentWeeklyReport.totalSubmissions],
+    ['Positive', currentWeeklyReport.positive],
+    ['Negative', currentWeeklyReport.negative],
+    ['Average intensity', currentWeeklyReport.averageIntensity ?? 'N/A'],
+    ...currentWeeklyReport.topTopics.map((item, index) => [`Top topic ${index + 1}`, `${item.topic} (${item.count})`])
+  ];
+  const csv = rows.map(row => row.map(value => `"${String(value).replaceAll('"', '""')}"`).join(',')).join('\r\n');
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  const link = document.createElement('a');
+  link.href = url; link.download = 'weekly-feedback-report.csv'; link.click();
+  URL.revokeObjectURL(url);
+});
+async function downloadWeeklyReport(format) {
+  try {
+    const response = await fetch(`/api/admin/weekly-report/${format}`);
+    if (response.status === 401) { window.location.replace('/login.html'); throw new Error('Please log in.'); }
+    if (!response.ok) throw new Error('Could not download the report.');
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `weekly-feedback-report.${format === 'excel' ? 'xlsx' : 'pdf'}`;
+    link.click();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    weeklyReportStatus.textContent = error.message || 'Could not download the report.';
+  }
+}
+document.querySelector('#weekly-report-pdf').addEventListener('click', () => downloadWeeklyReport('pdf'));
+document.querySelector('#weekly-report-excel').addEventListener('click', () => downloadWeeklyReport('excel'));
+async function loadKeyIssues() {
+  keyIssuesRefresh.disabled = true;
+  keyIssuesPeriod.textContent = 'Analyzing feedback from the last 30 days…';
+  keyIssuesList.replaceChildren();
+  const loading = document.createElement('li'); loading.className = 'key-issues-empty'; loading.textContent = 'Finding recurring issues…'; keyIssuesList.append(loading);
+  try {
+    const result = await api('/api/admin/key-issues');
+    keyIssuesPeriod.textContent = `${result.feedbackCount} recent submissions analyzed`;
+    keyIssuesList.replaceChildren();
+    if (!result.issues.length) {
+      const empty = document.createElement('li'); empty.className = 'key-issues-empty'; empty.textContent = result.feedbackCount ? 'No recurring issues were identified.' : 'No feedback submitted in the last 30 days.'; keyIssuesList.append(empty);
+      return;
+    }
+    for (const item of result.issues) {
+      const row = document.createElement('li'); row.className = 'key-issue-row';
+      const issue = document.createElement('span'); issue.textContent = item.issue;
+      const frequency = document.createElement('span'); frequency.className = 'key-issue-frequency'; frequency.textContent = `${item.mentions} ${item.mentions === 1 ? 'mention' : 'mentions'}`;
+      row.append(issue, frequency); keyIssuesList.append(row);
+    }
+  } catch (error) {
+    keyIssuesPeriod.textContent = 'Could not analyze recent feedback';
+    keyIssuesList.replaceChildren();
+    const failure = document.createElement('li'); failure.className = 'key-issues-empty'; failure.textContent = error.message || 'Could not load key issues.'; keyIssuesList.append(failure);
+  } finally { keyIssuesRefresh.disabled = false; }
+}
+keyIssuesRefresh.addEventListener('click', loadKeyIssues);
+loadKeyIssues();

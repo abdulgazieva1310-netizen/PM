@@ -1,13 +1,12 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { mkdtempSync, rmSync } = require('node:fs');
-const { tmpdir } = require('node:os');
-const path = require('node:path');
 const request = require('supertest');
 const { createApp } = require('../server');
-test('submission validation, protected admin flow, restart persistence and logout', async () => {
-  const directory = mkdtempSync(path.join(tmpdir(), 'feedback-test-'));
-  let instance = createApp({ dataDir: directory, analyze: async () => ({ sentiment: 'Positive', language: 'English', intensity: 4, ai_detected_topic: 'Library' }) });
+const { createTestDatabase } = require('./postgres-helper');
+test('submission validation, protected admin flow, persistence and logout', { skip: !process.env.TEST_DATABASE_URL }, async t => {
+  const { db, close } = await createTestDatabase();
+  let instance = await createApp({ db, analyze: async () => ({ sentiment: 'Positive', language: 'English', intensity: 4, ai_detected_topic: 'Library' }) });
+  t.after(async () => { await instance?.close(); await close(); });
   try {
     await request(instance.app).get('/').expect(200);
     await request(instance.app).get('/vendor/bootstrap/bootstrap.min.css').expect(200);
@@ -42,7 +41,7 @@ test('submission validation, protected admin flow, restart persistence and logou
     assert.equal(stats.body[0].topic, 'Library'); assert.equal(stats.body[0].count, 1);
     await request(instance.app).delete(`/api/topics/${added.body.id}`).set('Cookie', cookie).expect(200);
     await request(instance.app).post('/api/feedback').send({ topic: 'Housing', text: 'Deleted topic' }).expect(400);
-    instance.close(); instance = createApp({ dataDir: directory, analyze: async () => ({ sentiment: 'Positive', language: 'English', intensity: 4, ai_detected_topic: 'Library' }) });
+    instance = await createApp({ db, analyze: async () => ({ sentiment: 'Positive', language: 'English', intensity: 4, ai_detected_topic: 'Library' }) });
     const response = await request(instance.app).get('/api/feedback').set('Cookie', cookie).expect(200);
     assert.equal(response.body.length, 1);
     assert.equal(response.body[0].text, text);
@@ -53,5 +52,5 @@ test('submission validation, protected admin flow, restart persistence and logou
     assert.ok(Number.isFinite(Date.parse(response.body[0].submitted_at)));
     await request(instance.app).post('/api/logout').set('Cookie', cookie).send({}).expect(200);
     await request(instance.app).get('/api/feedback').set('Cookie', cookie).expect(401);
-  } finally { instance.close(); rmSync(directory, { recursive: true, force: true }); }
+  } finally { await instance.close(); }
 });

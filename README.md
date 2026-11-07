@@ -1,60 +1,61 @@
 # AI-Enhanced Student Feedback Analysis System
 
-A working student feedback collection and admin review application built with HTML, locally served Bootstrap, vanilla JavaScript, Node.js, Express, and SQLite. Includes Google Gemini sentiment analysis, language detection and emotion intensity scoring, with an administrator summary dashboard.
+A student feedback and administrator review app built with HTML, Bootstrap, vanilla JavaScript, Node.js, Express, PostgreSQL, and Google Gemini. It includes sentiment analysis, language detection, emotion intensity, weekly exports, and recurring issue summaries.
 
-## Install and run
+## Install and run locally
 
-1. Install Node.js 22.23 or later (Node.js 24 LTS also works), including npm.
-2. Open a terminal in this project folder.
-3. Install dependencies:
+1. Install Node.js 22 or later, npm, and PostgreSQL.
+2. Create a local database, for example:
+   ```sh
+   createdb ai_student_feedback
+   ```
+3. Copy `.env.example` to `.env` and set `DATABASE_URL` to your local PostgreSQL connection string. Set `SESSION_SECRET` and administrator credentials before exposing the app.
+4. Install dependencies and start the app:
    ```sh
    npm install
-   ```
-4. Optionally copy `.env.example` to `.env` and change configuration. No configuration is needed for local use.
-5. Start the server:
-   ```sh
    npm start
    ```
-6. Open http://localhost:3000 to submit feedback.
-7. Open http://localhost:3000/login.html and log in with username `admin` and password `admin123`.
-8. The dashboard at http://localhost:3000/admin shows all feedback, newest first. Use **Refresh feedback** to retrieve new submissions and **Sign out** to end the session.
+5. On startup, the app creates or updates all tables from `schema.sql`, seeds the default topics, and creates the first administrator if none exists.
+6. Open http://localhost:3000 to submit feedback and http://localhost:3000/login.html to sign in.
 
-For development with automatic server restarts, run `npm run dev`. Stop the server with Ctrl+C. To run the integration checks, use `npm test`.
+Set `DATABASE_URL` in Render's environment to the database's internal URL when the web service and database share a region. For local connections to Render use its external URL with `sslmode=require`. Set `NODE_ENV=production`, `SESSION_SECRET`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, and `GEMINI_API_KEY` in the service environment. Render runs `npm start`; no local database files or disk mount are needed. See [Render's Postgres connection guide](https://render.com/docs/postgresql-creating-connecting) for current connection details.
 
-SQLite uses Node.js’s built-in `node:sqlite` module; no native SQLite package compilation is needed. Node.js 22 may print an experimental SQLite warning.
+To create the tables manually before starting the app, run:
+
+```sh
+psql "$DATABASE_URL" -f schema.sql
+```
+
+The app uses parameterized PostgreSQL queries and `SERIAL` primary keys. Database setup and additive column migrations are idempotent. The first admin account is seeded only if no admin exists; changing `ADMIN_USERNAME` or `ADMIN_PASSWORD` later does not change an existing account.
+
+To copy an existing local SQLite database before deploying, set `DATABASE_URL` to the target PostgreSQL database and run `npm run migrate:sqlite`. The importer reads `data/database.db` by default; set `SQLITE_PATH` to use another file. It copies feedback, topics, administrator credentials, and settings without replacing conflicting PostgreSQL rows. It does not copy active login sessions. Keep the original SQLite file as a backup until you confirm the PostgreSQL data.
+
+For development with automatic server restarts, run `npm run dev`. `dotenv` loads `.env` for local use. To run the automated checks, use `npm test` with a dedicated test PostgreSQL database configured in `TEST_DATABASE_URL`.
 
 ## Files
 
-- `server.js`: routes, sessions, validation, access checks and error handling.
-- `database.js`: database schema, durable SQLite configuration and initial admin seed.
-- `public/index.html`, `public/login.html`: student and administrator entry pages.
-- `public/css/styles.css`, `public/js/*.js`: responsive styling and browser interactions.
-- `private/dashboard.html`: dashboard served only to authenticated administrators.
-- `test/app.test.js`: validation, login, authorization, persistence and logout checks.
-- `data/database.db`: automatically generated feedback/admin database.
-- `data/sessions.db`: automatically generated persistent session database.
+- `server.js`: routes, PostgreSQL-backed sessions, validation, and access checks.
+- `database.js` and `schema.sql`: PostgreSQL connection, tables, and initial seed.
+- `analysis.js`: Gemini feedback classification and key issue analysis.
+- `topics.js`: topic, feedback, and weekly report queries.
+- `private/dashboard.html`, `public/js/dashboard.js`, `public/css/styles.css`: admin interface.
 
 ## Data and authentication
 
-Feedback requires one of the currently available database topics and 1–5,000 non-whitespace characters. SQLite stores topic, feedback text, and an ISO 8601 UTC timestamp; the dashboard displays dates in the browser's local timezone. Success is returned only after the database insert completes. SQL uses bound parameters, and the dashboard inserts feedback as plain text.
+Feedback and sessions are stored in PostgreSQL and survive application restarts. Back up the PostgreSQL database using your provider's backup tools. Admin passwords use bcrypt hashes. Sessions expire after eight hours, and cookies are HttpOnly and SameSite=Strict. Login attempts and feedback submissions are rate limited. The dashboard and admin APIs require authentication.
 
-Admin passwords use bcrypt hashes. Login regenerates the session ID, sessions expire after eight hours, and cookies are HttpOnly and SameSite=Strict. Login attempts and feedback submissions are rate limited. Both the dashboard page and feedback-list API require authentication. Bootstrap is served locally; automated analysis requires the Gemini API.
+## Configuration
 
-Data and sessions survive application restarts. Keep the `data/` directory on persistent storage. Back up the database regularly; no application can guarantee against disk loss or deletion. For a simple consistent backup, stop the server and copy the entire `data/` directory, then restart. Do not delete the SQLite WAL files while the server is running. Tests use separate temporary databases and leave application data untouched.
-
-## Configuration and production
-
-- `PORT`: default `3000`.
-- `ADMIN_USERNAME`, `ADMIN_PASSWORD`: used **only when no administrator exists**, on the first startup. Set a strong password before the first start of a public deployment. Changing these values later does not update an existing account.
-- `SESSION_SECRET`: optional locally; otherwise a random secret is generated and persisted in the database. Set a long random secret explicitly for production.
-- `NODE_ENV=production`: requires `SESSION_SECRET` and enables Secure cookies, so HTTPS is required. When deploying behind a trusted TLS reverse proxy, configure Express `trust proxy` for your exact infrastructure before starting; do not blindly trust arbitrary forwarded headers.
-
-The default account is intended for local setup. There is no password-change UI, account recovery, or feedback deletion feature in the requested scope. All submitted feedback remains stored.
+- `DATABASE_URL`: required PostgreSQL connection string. Render supplies this when the database is linked to the web service.
+- `PORT`: defaults to `3000`; Render supplies its own port.
+- `ADMIN_USERNAME`, `ADMIN_PASSWORD`: used only to create the first administrator.
+- `SESSION_SECRET`: optional for local development; required in production.
+- `NODE_ENV=production`: enables Secure session cookies, so serve the app over HTTPS.
 
 ## Google Gemini setup and update instructions
 
-1. Stop the running server and back up the `data/` directory.
-2. Run `npm install` to install the new `@google/generative-ai` dependency and update the lockfile. Use this command before `npm ci` when upgrading from the earlier release.
+1. Stop the running server and make sure `DATABASE_URL` points to the PostgreSQL database.
+2. Run `npm install` to install project dependencies and update the lockfile.
 3. Copy `.env.example` to `.env` if you do not already have one. Preserve any existing configuration.
 4. Add these server-only values to `.env`:
    ```env
@@ -62,13 +63,13 @@ The default account is intended for local setup. There is no password-change UI,
    
    ```
    Create/manage your key in your Google Gemini API account. API access with available quota is required; free-tier limits depend on your project and model. Never share the key, place it in `public/`, or commit `.env`. The server never returns the key to the browser.
-5. Run `npm start`. Node's built-in environment loader reads `.env`; `dotenv` is not needed. Restart the process after changing the key.
+5. Run `npm start`. `dotenv` loads `.env` for local development. Restart the process after changing the key.
 6. Submit feedback at http://localhost:3000, then log in at http://localhost:3000/login.html using your existing administrator account. Click **Refresh feedback** to see new results.
-7. Run `node --test test/analysis.test.js` for offline AI/migration checks, or `npm test` for all checks including HTTP authentication tests. Tests mock Google Gemini and do not spend API credits.
+7. Run `npm test` with a dedicated PostgreSQL test database configured in `TEST_DATABASE_URL`. Use a separate database from development or production.
 
 ### Migration and behavior
 
-Startup automatically runs an idempotent, transactional SQLite migration that adds nullable `sentiment` (TEXT), `language` (TEXT), and `intensity` (INTEGER) columns using `ALTER TABLE`. Existing submissions, dates and administrator credentials are retained. There is no need to recreate or delete the database. Old records remain **Not analyzed**; this update does not automatically spend API credits analyzing historical submissions.
+Startup creates or updates the PostgreSQL schema transactionally and idempotently. The schema includes nullable analysis fields; records without analysis remain **Not analyzed**. No historical Gemini analysis is run automatically.
 
 For each new submission the server saves the original feedback, calls Google Gemini using the requested Google JavaScript SDK, validates the structured JSON response and writes all three results to that row before returning success. Feedback text is sent to Google Gemini; the student form discloses this. The model is fixed to `gemini-3.5-flash-lite` in `analysis.js`. The requested `@google/generative-ai` SDK is deprecated but retained to match the requested package.
 
@@ -80,7 +81,7 @@ Official references: [Gemini model shutdowns](https://ai.google.dev/gemini-api/d
 
 ## Verification in the build environment
 
-The offline analysis tests cover structured requests, supported languages, JSON validation, refusals, incomplete responses, migration preservation, successful persistence and API failures. HTTP checks require permission to listen on local network ports. A live Google Gemini call requires your private API key and network access. The build environment cannot resolve the npm registry, so install the new SDK on your computer with `npm install`.
+Analysis tests cover structured requests, supported languages, JSON validation, refusals, incomplete responses, persistence and API failures. Use a dedicated PostgreSQL database for database-backed tests. Tests mock Google Gemini and do not spend API credits.
 
 ## Troubleshooting unavailable AI analysis
 
@@ -134,9 +135,9 @@ Run `npm run check:ai` on the computer running the server. A connection failure 
 ### Run the update
 
 1. Stop the server with Ctrl+C. Back up the `data/` directory while the server is stopped.
-2. Run `npm install` if dependencies are not already installed. No new packages are needed for these topic features.
+2. Run `npm install` if dependencies are not already installed.
 3. Keep your existing `GEMINI_API_KEY` in `.env`; the model remains hardcoded to `gemini-3.5-flash-lite`.
-4. Run `npm start`. Startup automatically migrates SQLite, creates the `topics` table, seeds the original five topics once, imports any historical topic names, and adds nullable `feedback.ai_detected_topic`.
+4. Run `npm start`. Startup creates the PostgreSQL `topics` table, seeds the original five topics once, imports any topic names already in PostgreSQL feedback, and adds nullable `feedback.ai_detected_topic` if needed.
 5. Open http://localhost:3000/login.html and sign in. Use **Manage topics** to add or delete topics. Names must be unique (case insensitive), nonblank, and at most 80 characters. At least one topic must remain available.
 6. Open or refocus http://localhost:3000. The form fetches current topics from the server; newly added topics are immediately available to the API and appear on the next form load or window focus. A stale deleted selection is rejected by the server.
 7. Submit feedback. Gemini receives the current topic list and must return exactly one allowed `ai_detected_topic`, alongside sentiment, language and intensity. Student choices are preserved. The dashboard flags disagreement rather than silently replacing the student's topic. Older records have no AI-detected topic until analyzed; there is no automatic historical backfill.

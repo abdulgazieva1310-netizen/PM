@@ -1,11 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { mkdtempSync, rmSync } = require('node:fs');
-const { tmpdir } = require('node:os');
-const path = require('node:path');
-const { DatabaseSync } = require('node:sqlite');
-const { openDatabase } = require('../database');
 const { createAnalyzer, saveFeedback, describeAnalysisError } = require('../analysis');
+const { createTestDatabase } = require('./postgres-helper');
 function fakeClient(response) {
   return { getGenerativeModel: () => ({ generateContent: async () => ({ response }) }) };
 }
@@ -39,28 +35,24 @@ test('rejects malformed JSON, invalid labels, intensity, safety blocks and trunc
     completion('{}', { candidates: [] })
   ]) await assert.rejects(createAnalyzer({ client: fakeClient(response) })('text'));
 });
-test('migration preserves legacy rows, is repeatable, and successful/failed analysis survives restart', async () => {
-  const directory = mkdtempSync(path.join(tmpdir(), 'feedback-ai-'));
-  let db;
+test('PostgreSQL schema initialization is repeatable and successful/failed analysis persists', { skip: !process.env.TEST_DATABASE_URL }, async t => {
+  const { db, close } = await createTestDatabase();
+  t.after(close);
   try {
-    db = new DatabaseSync(path.join(directory, 'database.db'));
-    db.exec("CREATE TABLE feedback (id INTEGER PRIMARY KEY, topic TEXT NOT NULL, text TEXT NOT NULL, submitted_at TEXT NOT NULL); INSERT INTO feedback VALUES (1, 'Library', 'Legacy feedback', '2026-01-01T00:00:00Z')");
-    db.close(); db = openDatabase(directory);
-    assert.equal(db.prepare('SELECT sentiment FROM feedback WHERE id = 1').get().sentiment, null);
-    assert.equal(db.prepare('SELECT text FROM feedback WHERE id = 1').get().text, 'Legacy feedback');
+    await require('../database').initializeDatabase(db);
     const success = await saveFeedback(db, { topic: 'Library', text: 'so cold' }, async () => ({ sentiment: 'Negative', language: 'English', intensity: 6, ai_detected_topic: 'Library' }));
     assert.equal(success.analyzed, true);
     const failure = await saveFeedback(db, { topic: 'Other', text: 'Saved during outage' }, async () => { throw new Error('API timeout'); });
     assert.equal(failure.analyzed, false);
-    assert.ok(db.prepare('SELECT analysis_error FROM feedback WHERE id = ?').get(failure.id).analysis_error);
-    db.close(); db = openDatabase(directory);
-    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM feedback').get().count, 3);
-    const row = db.prepare('SELECT * FROM feedback WHERE id = ?').get(success.id);
+    assert.ok((await db.query('SELECT analysis_error FROM feedback WHERE id = $1', [failure.id])).rows[0].analysis_error);
+    await require('../database').initializeDatabase(db);
+    assert.equal((await db.query('SELECT COUNT(*)::int AS count FROM feedback')).rows[0].count, 2);
+    const row = (await db.query('SELECT * FROM feedback WHERE id = $1', [success.id])).rows[0];
     assert.equal(row.ai_detected_topic, 'Library');
     assert.equal(row.sentiment, 'Negative'); assert.equal(row.intensity, 6); assert.equal(row.language, 'English');
     assert.ok(Number.isFinite(Date.parse(row.submitted_at)));
-    assert.equal(db.prepare('SELECT sentiment FROM feedback WHERE id = ?').get(failure.id).sentiment, null);
-  } finally { db?.close(); rmSync(directory, { recursive: true, force: true }); }
+    assert.equal((await db.query('SELECT sentiment FROM feedback WHERE id = $1', [failure.id])).rows[0].sentiment, null);
+  } catch (error) { throw error; }
 });
 
 test('diagnostic messages identify failures without echoing secrets or URLs', () => {

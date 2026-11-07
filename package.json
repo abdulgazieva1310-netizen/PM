@@ -7,19 +7,24 @@
     "node": ">=22"
   },
   "scripts": {
-    "start": "node --env-file-if-exists=.env server.js",
-    "dev": "node --env-file-if-exists=.env --watch server.js",
+    "start": "node server.js",
+    "dev": "node --watch server.js",
     "test": "node --test",
-    "check:ai": "node --env-file-if-exists=.env analysis.js"
+    "check:ai": "node analysis.js",
+    "migrate:sqlite": "node scripts/migrate-sqlite-to-postgres.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "bcryptjs": "^3.0.2",
     "bootstrap": "^5.3.8",
+    "dotenv": "^18.0.9",
+    "exceljs": "^4.4.0",
     "express": "^5.1.0",
     "express-rate-limit": "^8.0.0",
     "express-session": "^1.18.2",
-    "helmet": "^8.1.0"
+    "helmet": "^8.1.0",
+    "pdfkit": "^0.20.2",
+    "pg": "^8.23.1"
   },
   "devDependencies": {
     "supertest": "^7.1.4"
