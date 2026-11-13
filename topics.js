@@ -33,7 +33,7 @@ async function deleteTopic(db, id) {
   } finally { client.release(); }
 }
 async function listFeedback(db, topic) {
-  const fields = 'topic, text, summary, submitted_at, sentiment, language, intensity, analysis_error, ai_detected_topic';
+  const fields = 'id, topic, text, summary, submitted_at, sentiment, language, intensity, analysis_error, ai_detected_topic';
   const result = topic
     ? await db.query(`SELECT ${fields} FROM feedback WHERE topic = $1 ORDER BY id DESC`, [topic])
     : await db.query(`SELECT ${fields} FROM feedback ORDER BY id DESC`);

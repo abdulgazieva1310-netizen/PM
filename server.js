@@ -9,7 +9,7 @@ const path = require('node:path');
 const PDFDocument = require('pdfkit');
 const ExcelJS = require('exceljs');
 const { openDatabase } = require('./database');
-const { createAnalyzer, createKeyIssueAnalyzer, saveFeedback, describeAnalysisError } = require('./analysis');
+const { createAnalyzer, createKeyIssueAnalyzer, saveFeedback, validateAnalysis, describeAnalysisError } = require('./analysis');
 const { listTopics, addTopic, deleteTopic, listFeedback, topicStatistics, weeklyReport } = require('./topics');
 class PostgresSessionStore extends session.Store {
   constructor(db) { super(); this.db = db; }
@@ -93,6 +93,62 @@ async function createApp({ databaseUrl = process.env.DATABASE_URL, db: suppliedD
         FROM dates LEFT JOIN counts USING (date) ORDER BY dates.date`, [days]);
       const data = result.rows.map(row => ({ date: row.date, total: row.total, positive: row.positive, negative: row.negative, neutral: row.neutral }));
       res.json({ days, period: { start: data[0]?.date, end: data.at(-1)?.date }, data });
+    } catch (error) { next(error); }
+  });
+  app.get('/api/admin/alerts', requireAdmin, async (req, res, next) => {
+    try {
+      const result = await db.query(`WITH bounds AS (
+          SELECT (NOW() AT TIME ZONE 'UTC')::date AS today
+        ), period_counts AS (
+          SELECT
+            COUNT(*) FILTER (WHERE feedback.sentiment = 'Negative'
+              AND feedback.submitted_at >= ((bounds.today - 2)::timestamp AT TIME ZONE 'UTC'))::int AS recent_negative,
+            COUNT(*) FILTER (WHERE feedback.sentiment = 'Negative'
+              AND feedback.submitted_at < ((bounds.today - 2)::timestamp AT TIME ZONE 'UTC'))::int AS previous_negative
+          FROM feedback CROSS JOIN bounds
+          WHERE feedback.submitted_at >= ((bounds.today - 9)::timestamp AT TIME ZONE 'UTC')
+            AND feedback.submitted_at < ((bounds.today + 1)::timestamp AT TIME ZONE 'UTC')
+        ), topic_daily AS (
+          SELECT feedback.topic, (feedback.submitted_at AT TIME ZONE 'UTC')::date AS date, COUNT(*)::int AS count
+          FROM feedback CROSS JOIN bounds
+          WHERE feedback.sentiment = 'Negative'
+            AND feedback.submitted_at >= ((bounds.today - 2)::timestamp AT TIME ZONE 'UTC')
+            AND feedback.submitted_at < ((bounds.today + 1)::timestamp AT TIME ZONE 'UTC')
+          GROUP BY feedback.topic, (feedback.submitted_at AT TIME ZONE 'UTC')::date
+          HAVING COUNT(*) >= 3
+        )
+        SELECT period_counts.recent_negative, period_counts.previous_negative,
+          COALESCE((SELECT json_agg(json_build_object(
+            'topic', topic_daily.topic,
+            'date', to_char(topic_daily.date, 'YYYY-MM-DD'),
+            'count', topic_daily.count
+          ) ORDER BY topic_daily.date DESC, topic_daily.topic) FROM topic_daily), '[]'::json) AS topic_alerts
+        FROM period_counts`, []);
+      const row = result.rows[0];
+      const recentNegative = row.recent_negative;
+      const previousNegative = row.previous_negative;
+      const recentDailyRate = recentNegative / 3;
+      const previousDailyRate = previousNegative / 7;
+      const alerts = [];
+      if (recentNegative > 0 && (previousDailyRate === 0 || recentDailyRate >= previousDailyRate * 1.2)) {
+        const increase = previousDailyRate === 0 ? null : Math.round((recentDailyRate / previousDailyRate - 1) * 100);
+        alerts.push({
+          type: 'negative-trend',
+          message: increase == null
+            ? `Warning: Negative feedback has appeared in the last 3 days after none in the previous 7 days (${recentNegative} recent submissions).`
+            : `Warning: Negative feedback is increasing rapidly, up ${increase}% by daily average over the previous 7 days.`
+        });
+      }
+      for (const item of row.topic_alerts) {
+        alerts.push({
+          type: 'topic-negative-spike',
+          topic: item.topic,
+          date: item.date,
+          count: item.count,
+          message: `Warning: ${item.count} negative feedback submissions about '${item.topic}' were received on ${item.date}.`
+        });
+      }
+      res.json(alerts);
     } catch (error) { next(error); }
   });
   app.get('/api/admin/key-issues', requireAdmin, async (req, res, next) => {
@@ -203,6 +259,26 @@ async function createApp({ databaseUrl = process.env.DATABASE_URL, db: suppliedD
   app.get('/api/feedback', requireAdmin, async (req, res) => {
     if (req.query.topic !== undefined && (typeof req.query.topic !== 'string' || req.query.topic.length > 80)) return res.status(400).json({ error: 'Invalid topic filter.' });
     res.json(await listFeedback(db, req.query.topic));
+  });
+  app.post('/api/admin/feedback/:id/reanalyze', requireAdmin, async (req, res, next) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: 'Invalid feedback ID.' });
+    try {
+      const feedback = (await db.query('SELECT id, text FROM feedback WHERE id = $1', [id])).rows[0];
+      if (!feedback) return res.status(404).json({ error: 'Feedback not found.' });
+      const allowedTopics = (await listTopics(db)).map(topic => topic.name);
+      let analysis;
+      try { analysis = validateAnalysis(await analyze(feedback.text, allowedTopics), allowedTopics); }
+      catch (error) {
+        const message = describeAnalysisError(error);
+        await db.query('UPDATE feedback SET analysis_error = $1 WHERE id = $2', [message, id]);
+        return res.status(503).json({ error: message });
+      }
+      await db.query(`UPDATE feedback SET sentiment = $1, language = $2, intensity = $3,
+        ai_detected_topic = $4, summary = $5, analysis_error = NULL WHERE id = $6`,
+      [analysis.sentiment, analysis.language, analysis.intensity, analysis.ai_detected_topic, analysis.summary || feedback.text, id]);
+      res.json({ id, ...analysis, analyzed: true });
+    } catch (error) { next(error); }
   });
   app.post('/api/logout', requireAdmin, (req, res, next) => req.session.destroy(error => {
     if (error) return next(error);

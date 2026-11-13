@@ -14,6 +14,8 @@ const weeklyReportTopics = document.querySelector('#weekly-report-topics');
 const weeklyReportDownloads = [...document.querySelectorAll('#weekly-report-pdf, #weekly-report-excel, #weekly-report-csv')];
 const trendTimeframe = document.querySelector('#trend-timeframe');
 const trendStatus = document.querySelector('#trend-status');
+const adminAlertBanner = document.querySelector('#admin-alert-banner');
+const adminAlertList = document.querySelector('#admin-alert-list');
 let trendsChart = null;
 const trendsCache = new Map();
 let currentWeeklyReport = null;
@@ -88,13 +90,32 @@ async function loadFeedback() {
           const badge = document.createElement('span');
           badge.className = `sentiment-badge sentiment-${item.sentiment.toLowerCase()}`;
           badge.textContent = value; cell.append(badge);
+        } else if (index === 4 && !item.sentiment) {
+          cell.textContent = value;
+          if (item.analysis_error) {
+            const reason = document.createElement('small');
+            reason.className = 'd-block text-danger mt-2';
+            reason.textContent = item.analysis_error;
+            cell.append(reason);
+          }
+          const retry = document.createElement('button');
+          retry.type = 'button'; retry.className = 'btn btn-outline-primary btn-sm mt-2'; retry.textContent = 'Re-analyze';
+          retry.setAttribute('aria-label', `Re-analyze feedback ${item.id}`);
+          retry.addEventListener('click', async () => {
+            retry.disabled = true; retry.textContent = 'Analyzing…';
+            try {
+              await api(`/api/admin/feedback/${item.id}/reanalyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+              await loadFeedback();
+            } catch (error) {
+              const failure = document.createElement('small');
+              failure.className = 'd-block text-danger mt-2';
+              failure.textContent = error.message || 'Could not re-analyze this feedback.';
+              cell.append(failure);
+              retry.disabled = false; retry.textContent = 'Retry analysis';
+            }
+          });
+          cell.append(retry);
         } else { cell.textContent = value; }
-        if (index === 4 && !item.sentiment && item.analysis_error) {
-          const reason = document.createElement('small');
-          reason.className = 'd-block text-danger mt-2';
-          reason.textContent = item.analysis_error;
-          cell.append(reason);
-        }
         if (index === 1 && item.ai_detected_topic && item.ai_detected_topic !== item.topic) {
           const flag = document.createElement('small'); flag.className = 'd-block text-warning-emphasis mt-2'; flag.textContent = 'Differs from student selection'; cell.append(flag);
         }
@@ -160,6 +181,24 @@ async function loadTrends() {
 }
 trendTimeframe.addEventListener('change', loadTrends);
 loadTrends();
+async function loadAdminAlerts() {
+  try {
+    const alerts = await api('/api/admin/alerts');
+    adminAlertList.replaceChildren();
+    if (!alerts.length) { adminAlertBanner.hidden = true; return; }
+    for (const alert of alerts) {
+      const item = document.createElement('li');
+      item.textContent = alert.message;
+      adminAlertList.append(item);
+    }
+    adminAlertBanner.hidden = false;
+  } catch (error) {
+    adminAlertBanner.hidden = true;
+    console.error('Could not load administrator alerts:', error);
+  }
+}
+document.querySelector('#admin-alert-dismiss').addEventListener('click', () => { adminAlertBanner.hidden = true; });
+loadAdminAlerts();
 function closeWeeklyReport() { weeklyReportDialog.close(); }
 function addMetricCard(container, label, value, icon, tone) {
   const card = document.createElement('article'); card.className = `weekly-metric-card ${tone}`;
