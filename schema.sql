@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS feedback (
   ai_detected_topic TEXT,
   summary TEXT
 );
+CREATE INDEX IF NOT EXISTS feedback_submitted_at_idx ON feedback (submitted_at);
 
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,

@@ -12,6 +12,10 @@ const weeklyReportMetrics = document.querySelector('#weekly-report-metrics');
 const weeklyReportSentiment = document.querySelector('#weekly-report-sentiment');
 const weeklyReportTopics = document.querySelector('#weekly-report-topics');
 const weeklyReportDownloads = [...document.querySelectorAll('#weekly-report-pdf, #weekly-report-excel, #weekly-report-csv')];
+const trendTimeframe = document.querySelector('#trend-timeframe');
+const trendStatus = document.querySelector('#trend-status');
+let trendsChart = null;
+const trendsCache = new Map();
 let currentWeeklyReport = null;
 async function api(url, options) {
   const response = await fetch(url, options);
@@ -121,6 +125,41 @@ document.querySelector('#logout').addEventListener('click', async () => {
   } catch(error) { message.hidden = false; message.className = 'm-3 alert alert-danger'; message.textContent = error.message; }
 });
 loadFeedback();
+async function loadTrends() {
+  const days = Number(trendTimeframe.value);
+  trendTimeframe.disabled = true;
+  trendStatus.textContent = trendsCache.has(days) ? 'Updating chart…' : 'Loading trends…';
+  try {
+    let result = trendsCache.get(days);
+    if (!result) {
+      result = await api(`/api/admin/trends?days=${days}`);
+      trendsCache.set(days, result);
+    }
+    if (!window.Chart) throw new Error('The chart library could not be loaded. Refresh the page to try again.');
+    const dateLabel = new Intl.DateTimeFormat('en-US', { month: 'short', day: '2-digit', timeZone: 'UTC' });
+    const labels = result.data.map(item => {
+      const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(item.date).slice(0, 10));
+      if (!match) return '—';
+      const [, year, month, day] = match;
+      return dateLabel.format(new Date(Date.UTC(Number(year), Number(month) - 1, Number(day))));
+    });
+    const configuration = {
+      type: 'line',
+      data: { labels, datasets: [
+        { label: 'Positive', data: result.data.map(item => item.positive), borderColor: '#266b56', backgroundColor: '#266b56', tension: 0.3 },
+        { label: 'Negative', data: result.data.map(item => item.negative), borderColor: '#ae4848', backgroundColor: '#ae4848', tension: 0.3 },
+        { label: 'Neutral', data: result.data.map(item => Number(item.neutral ?? 0)), borderColor: '#697784', backgroundColor: '#697784', borderWidth: 2, borderDash: [5, 4], pointRadius: 3, pointHoverRadius: 6, pointBackgroundColor: '#697784', tension: 0.3 }
+      ] },
+      options: { responsive: true, maintainAspectRatio: false, interaction: { intersect: false, mode: 'index' }, scales: { x: { type: 'category', ticks: { autoSkip: true, maxTicksLimit: result.days === 7 ? 7 : result.days === 30 ? 15 : 12 } }, y: { beginAtZero: true, ticks: { precision: 0 } } }, plugins: { legend: { position: 'bottom' } } }
+    };
+    if (trendsChart) { trendsChart.data = configuration.data; trendsChart.options = configuration.options; trendsChart.update(); }
+    else trendsChart = new Chart(document.querySelector('#feedback-trends-chart'), configuration);
+    trendStatus.textContent = `${result.period.start} – ${result.period.end} UTC · ${result.data.reduce((sum, item) => sum + item.total, 0).toLocaleString()} total submissions`;
+  } catch (error) { trendStatus.textContent = error.message || 'Could not load feedback trends.'; }
+  finally { trendTimeframe.disabled = false; }
+}
+trendTimeframe.addEventListener('change', loadTrends);
+loadTrends();
 function closeWeeklyReport() { weeklyReportDialog.close(); }
 function addMetricCard(container, label, value, icon, tone) {
   const card = document.createElement('article'); card.className = `weekly-metric-card ${tone}`;

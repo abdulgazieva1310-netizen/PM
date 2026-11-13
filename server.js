@@ -45,7 +45,7 @@ async function createApp({ databaseUrl = process.env.DATABASE_URL, db: suppliedD
   const app = express();
   app.set('trust proxy', 1);
   app.disable('x-powered-by');
-  app.use(helmet());
+  app.use(helmet({ contentSecurityPolicy: { directives: { scriptSrc: ["'self'", 'https://cdn.jsdelivr.net'] } } }));
   app.use(express.json({ limit: '32kb' }));
   app.use(session({ store, secret, name: 'feedback.sid', resave: false, saveUninitialized: false, cookie: { httpOnly: true, sameSite: 'strict', secure: production, maxAge: 8 * 60 * 60 * 1000 } }));
   app.use('/api', (req, res, next) => {
@@ -65,6 +65,36 @@ async function createApp({ databaseUrl = process.env.DATABASE_URL, db: suppliedD
     catch (error) { if (!error.status) throw error; res.status(error.status).json({ error: error.message }); }
   });
   app.get('/api/statistics/topics', requireAdmin, async (req, res) => res.json(await topicStatistics(db)));
+  app.get('/api/admin/trends', requireAdmin, async (req, res, next) => {
+    try {
+      const days = req.query.days === undefined ? 7 : Number(req.query.days);
+      if (![7, 30, 90].includes(days)) return res.status(400).json({ error: 'Choose a timeframe of 7, 30, or 90 days.' });
+      const result = await db.query(`WITH bounds AS (
+          SELECT (NOW() AT TIME ZONE 'UTC')::date - ($1::int - 1) AS start_date,
+            (NOW() AT TIME ZONE 'UTC')::date AS end_date
+        ), dates AS (
+          SELECT series.day::date AS date FROM bounds,
+            generate_series(bounds.start_date::timestamp, bounds.end_date::timestamp, INTERVAL '1 day') AS series(day)
+        ), counts AS (
+          SELECT (feedback.submitted_at AT TIME ZONE 'UTC')::date AS date,
+            COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE sentiment = 'Positive')::int AS positive,
+            COUNT(*) FILTER (WHERE sentiment = 'Negative')::int AS negative,
+            COUNT(*) FILTER (WHERE sentiment = 'Neutral')::int AS neutral
+          FROM feedback CROSS JOIN bounds
+          WHERE feedback.submitted_at >= (bounds.start_date::timestamp AT TIME ZONE 'UTC')
+            AND feedback.submitted_at < ((bounds.end_date + 1)::timestamp AT TIME ZONE 'UTC')
+          GROUP BY (feedback.submitted_at AT TIME ZONE 'UTC')::date
+        )
+        SELECT to_char(dates.date, 'YYYY-MM-DD') AS date, COALESCE(counts.total, 0)::int AS total,
+          COALESCE(counts.positive, 0)::int AS positive,
+          COALESCE(counts.negative, 0)::int AS negative,
+          COALESCE(counts.neutral, 0)::int AS neutral
+        FROM dates LEFT JOIN counts USING (date) ORDER BY dates.date`, [days]);
+      const data = result.rows.map(row => ({ date: row.date, total: row.total, positive: row.positive, negative: row.negative, neutral: row.neutral }));
+      res.json({ days, period: { start: data[0]?.date, end: data.at(-1)?.date }, data });
+    } catch (error) { next(error); }
+  });
   app.get('/api/admin/key-issues', requireAdmin, async (req, res, next) => {
     try {
       const end = new Date();
