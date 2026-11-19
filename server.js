@@ -11,6 +11,7 @@ const ExcelJS = require('exceljs');
 const { openDatabase } = require('./database');
 const { createAnalyzer, createKeyIssueAnalyzer, saveFeedback, validateAnalysis, describeAnalysisError } = require('./analysis');
 const { listTopics, addTopic, deleteTopic, listFeedback, topicStatistics, weeklyReport } = require('./topics');
+const { sendAlertEmail } = require('./alert-email');
 class PostgresSessionStore extends session.Store {
   constructor(db) { super(); this.db = db; }
   get(sid, cb) {
@@ -65,6 +66,30 @@ async function createApp({ databaseUrl = process.env.DATABASE_URL, db: suppliedD
     catch (error) { if (!error.status) throw error; res.status(error.status).json({ error: error.message }); }
   });
   app.get('/api/statistics/topics', requireAdmin, async (req, res) => res.json(await topicStatistics(db)));
+  app.get('/api/admin/monthly-comparison', requireAdmin, async (req, res, next) => {
+    try {
+      const result = await db.query(`WITH bounds AS (
+          SELECT date_trunc('month', NOW() AT TIME ZONE 'UTC') AS current_start
+        ), periods AS (
+          SELECT 'currentMonth' AS period, current_start AS start_at, current_start + INTERVAL '1 month' AS end_at FROM bounds
+          UNION ALL
+          SELECT 'previousMonth', current_start - INTERVAL '1 month', current_start FROM bounds
+        ), counts AS (
+          SELECT periods.period, COUNT(feedback.id)::int AS total,
+            COUNT(feedback.id) FILTER (WHERE feedback.sentiment = 'Positive')::int AS positive,
+            COUNT(feedback.id) FILTER (WHERE feedback.sentiment = 'Negative')::int AS negative,
+            COUNT(feedback.id) FILTER (WHERE feedback.sentiment = 'Neutral')::int AS neutral
+          FROM periods LEFT JOIN feedback ON feedback.submitted_at >= (periods.start_at AT TIME ZONE 'UTC')
+            AND feedback.submitted_at < (periods.end_at AT TIME ZONE 'UTC')
+          GROUP BY periods.period
+        )
+        SELECT period, total, positive, negative, neutral FROM counts`);
+      const data = Object.fromEntries(result.rows.map(row => [row.period, {
+        total: row.total, positive: row.positive, negative: row.negative, neutral: row.neutral
+      }]));
+      res.json(data);
+    } catch (error) { next(error); }
+  });
   app.get('/api/admin/trends', requireAdmin, async (req, res, next) => {
     try {
       const days = req.query.days === undefined ? 7 : Number(req.query.days);
@@ -93,6 +118,21 @@ async function createApp({ databaseUrl = process.env.DATABASE_URL, db: suppliedD
         FROM dates LEFT JOIN counts USING (date) ORDER BY dates.date`, [days]);
       const data = result.rows.map(row => ({ date: row.date, total: row.total, positive: row.positive, negative: row.negative, neutral: row.neutral }));
       res.json({ days, period: { start: data[0]?.date, end: data.at(-1)?.date }, data });
+    } catch (error) { next(error); }
+  });
+  app.get('/api/admin/notifications', requireAdmin, async (req, res, next) => {
+    try {
+      const result = await db.query('SELECT id, message, type, is_read, created_at FROM notifications ORDER BY created_at DESC, id DESC');
+      res.json(result.rows);
+    } catch (error) { next(error); }
+  });
+  app.post('/api/admin/notifications/:id/read', requireAdmin, async (req, res, next) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: 'Invalid notification id.' });
+      const result = await db.query('UPDATE notifications SET is_read = TRUE WHERE id = $1 RETURNING id, message, type, is_read, created_at', [id]);
+      if (!result.rowCount) return res.status(404).json({ error: 'Notification not found.' });
+      res.json(result.rows[0]);
     } catch (error) { next(error); }
   });
   app.get('/api/admin/alerts', requireAdmin, async (req, res, next) => {
@@ -147,6 +187,13 @@ async function createApp({ databaseUrl = process.env.DATABASE_URL, db: suppliedD
           count: item.count,
           message: `Warning: ${item.count} negative feedback submissions about '${item.topic}' were received on ${item.date}.`
         });
+      }
+      for (const alert of alerts) {
+        const saved = await db.query('INSERT INTO notifications (message, type) VALUES ($1, $2) ON CONFLICT (type, message) DO NOTHING RETURNING id', [alert.message, alert.type]);
+        if (saved.rowCount) {
+          try { await sendAlertEmail(alert); }
+          catch (error) { console.error('Could not send administrator alert email:', error); }
+        }
       }
       res.json(alerts);
     } catch (error) { next(error); }

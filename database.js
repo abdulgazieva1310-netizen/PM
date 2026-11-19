@@ -18,6 +18,15 @@ async function initializeDatabase(pool, { seedAdmin = true } = {}) {
       ALTER TABLE feedback ADD COLUMN IF NOT EXISTS analysis_error TEXT;
       ALTER TABLE feedback ADD COLUMN IF NOT EXISTS ai_detected_topic TEXT;
       ALTER TABLE feedback ADD COLUMN IF NOT EXISTS summary TEXT;
+      CREATE TABLE IF NOT EXISTS notifications (
+        id SERIAL PRIMARY KEY,
+        message TEXT NOT NULL,
+        type TEXT NOT NULL DEFAULT 'warning',
+        is_read BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (type, message)
+      );
+      CREATE INDEX IF NOT EXISTS notifications_created_at_idx ON notifications (created_at DESC);
     `);
 
     const initialized = await client.query("SELECT value FROM settings WHERE key = 'topics_initialized'");

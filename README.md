@@ -50,6 +50,8 @@ Feedback and sessions are stored in PostgreSQL and survive application restarts.
 - `PORT`: defaults to `3000`; Render supplies its own port.
 - `SESSION_SECRET`: optional for local development; required in production.
 - `NODE_ENV=production`: enables Secure session cookies, so serve the app over HTTPS.
+- `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS`: SMTP server settings for administrator alert email. `SMTP_PORT` defaults to `587`; set `SMTP_SECURE=true` for implicit TLS, otherwise Nodemailer uses STARTTLS when available.
+- `ADMIN_EMAIL`: administrator recipient address. Email sends only when this and all three required SMTP settings are configured. `SMTP_FROM` optionally overrides the sender address; it defaults to `SMTP_USER`.
 
 ## Google Gemini setup and update instructions
 

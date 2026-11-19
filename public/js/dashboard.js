@@ -16,6 +16,10 @@ const trendTimeframe = document.querySelector('#trend-timeframe');
 const trendStatus = document.querySelector('#trend-status');
 const adminAlertBanner = document.querySelector('#admin-alert-banner');
 const adminAlertList = document.querySelector('#admin-alert-list');
+const notificationToggle = document.querySelector('#notification-toggle');
+const notificationPanel = document.querySelector('#notification-panel');
+const notificationCount = document.querySelector('#notification-count');
+const notificationList = document.querySelector('#notification-list');
 let trendsChart = null;
 const trendsCache = new Map();
 let currentWeeklyReport = null;
@@ -181,6 +185,39 @@ async function loadTrends() {
 }
 trendTimeframe.addEventListener('change', loadTrends);
 loadTrends();
+const monthlyComparisonStatus = document.querySelector('#monthly-comparison-status');
+const monthlyComparisonContent = document.querySelector('#monthly-comparison-content');
+async function loadMonthlyComparison() {
+  try {
+    const result = await api('/api/admin/monthly-comparison');
+    const now = new Date();
+    const currentLabel = new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(now);
+    const previousLabel = new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1)));
+    monthlyComparisonContent.replaceChildren();
+    for (const [key, label] of [['previousMonth', previousLabel], ['currentMonth', currentLabel]]) {
+      const stats = result[key];
+      const card = document.createElement('article'); card.className = 'monthly-comparison-period';
+      const heading = document.createElement('h3'); heading.textContent = label;
+      const list = document.createElement('dl');
+      for (const metric of ['total', 'positive', 'negative', 'neutral']) {
+        const row = document.createElement('div'); row.className = 'monthly-comparison-metric';
+        const name = document.createElement('dt'); name.textContent = metric[0].toUpperCase() + metric.slice(1);
+        const value = document.createElement('dd'); value.textContent = Number(stats[metric]).toLocaleString();
+        row.append(name, value); list.append(row);
+      }
+      card.append(heading, list); monthlyComparisonContent.append(card);
+    }
+    const current = result.currentMonth, previous = result.previousMonth;
+    const change = document.createElement('p'); change.className = 'monthly-comparison-change';
+    const positiveDelta = current.positive - previous.positive;
+    const negativeDelta = current.negative - previous.negative;
+    change.classList.add(positiveDelta > 0 ? 'change-good' : positiveDelta < 0 ? 'change-bad' : 'change-neutral');
+    change.textContent = `${positiveDelta > 0 ? '↑' : positiveDelta < 0 ? '↓' : '→'} Positive feedback ${positiveDelta > 0 ? 'increased' : positiveDelta < 0 ? 'decreased' : 'unchanged'} by ${Math.abs(positiveDelta).toLocaleString()} · Negative feedback ${negativeDelta > 0 ? '↑ increased' : negativeDelta < 0 ? '↓ decreased' : '→ unchanged'} by ${Math.abs(negativeDelta).toLocaleString()}`;
+    monthlyComparisonContent.append(change);
+    monthlyComparisonStatus.textContent = 'Counts compare the full previous month with the current month to date (UTC).';
+  } catch (error) { monthlyComparisonStatus.textContent = error.message || 'Could not load monthly comparison.'; }
+}
+loadMonthlyComparison();
 async function loadAdminAlerts() {
   try {
     const alerts = await api('/api/admin/alerts');
@@ -198,7 +235,50 @@ async function loadAdminAlerts() {
   }
 }
 document.querySelector('#admin-alert-dismiss').addEventListener('click', () => { adminAlertBanner.hidden = true; });
-loadAdminAlerts();
+loadAdminAlerts().then(loadNotifications);
+async function loadNotifications() {
+  try {
+    const notifications = await api('/api/admin/notifications');
+    notificationList.replaceChildren();
+    const unreadCount = notifications.filter(notification => !notification.is_read).length;
+    notificationCount.textContent = unreadCount > 99 ? '99+' : String(unreadCount);
+    notificationCount.hidden = unreadCount === 0;
+    if (!notifications.length) {
+      const empty = document.createElement('li'); empty.className = 'notification-empty'; empty.textContent = 'No alerts yet.';
+      notificationList.append(empty); return;
+    }
+    for (const notification of notifications) {
+      const item = document.createElement('li'); item.className = `notification-item${notification.is_read ? ' is-read' : ''}`;
+      const date = document.createElement('time'); date.className = 'notification-date';
+      date.dateTime = notification.created_at; date.textContent = new Date(notification.created_at).toLocaleString();
+      const message = document.createElement('p'); message.textContent = notification.message;
+      item.append(date, message);
+      if (!notification.is_read) {
+        const markRead = document.createElement('button'); markRead.type = 'button'; markRead.className = 'btn btn-sm btn-outline-secondary'; markRead.textContent = 'Mark as Read';
+        markRead.addEventListener('click', async () => {
+          markRead.disabled = true;
+          try { await api(`/api/admin/notifications/${notification.id}/read`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); await loadNotifications(); }
+          catch (error) { markRead.disabled = false; console.error('Could not mark notification as read:', error); }
+        });
+        item.append(markRead);
+      }
+      notificationList.append(item);
+    }
+  } catch (error) {
+    notificationList.replaceChildren();
+    const failed = document.createElement('li'); failed.className = 'notification-empty'; failed.textContent = error.message || 'Could not load notifications.';
+    notificationList.append(failed); console.error('Could not load notifications:', error);
+  }
+}
+notificationToggle.addEventListener('click', () => {
+  notificationPanel.hidden = !notificationPanel.hidden;
+  notificationToggle.setAttribute('aria-expanded', String(!notificationPanel.hidden));
+  if (!notificationPanel.hidden) loadNotifications();
+});
+document.addEventListener('click', event => {
+  if (!event.target.closest('.notification-center')) { notificationPanel.hidden = true; notificationToggle.setAttribute('aria-expanded', 'false'); }
+});
+loadNotifications();
 function closeWeeklyReport() { weeklyReportDialog.close(); }
 function addMetricCard(container, label, value, icon, tone) {
   const card = document.createElement('article'); card.className = `weekly-metric-card ${tone}`;

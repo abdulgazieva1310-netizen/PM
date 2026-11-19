@@ -34,3 +34,13 @@ CREATE TABLE IF NOT EXISTS sessions (
   data JSONB NOT NULL,
   expires BIGINT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id SERIAL PRIMARY KEY,
+  message TEXT NOT NULL,
+  type TEXT NOT NULL DEFAULT 'warning',
+  is_read BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (type, message)
+);
+CREATE INDEX IF NOT EXISTS notifications_created_at_idx ON notifications (created_at DESC);
